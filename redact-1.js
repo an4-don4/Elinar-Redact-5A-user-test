@@ -3,7 +3,7 @@
 
   const steps = [
     { id: 'tutorial', label: 'Redact in Action' },
-    { id: 'why', label: 'Why Elinar' },
+    { id: 'why', label: 'About Elinar' },
     { id: 'demo', label: 'Guided Demo' },
     { id: 'complete', label: 'Tutorial Complete' }
   ];
@@ -11,13 +11,13 @@
   const guideSteps = [
     { target: '.zoom-controls', title: 'Adjust zoom', copy: 'Increase or decrease the document zoom to inspect the page comfortably.' },
     { target: '.page-controls', title: 'Navigate pages', copy: 'Move between the pages in the document.' },
-    { target: '.toolbar-search', title: 'Search the document', copy: 'Search for a word or phrase and select matching details throughout the document.' },
-    { target: '#mask-all', title: 'Mask all', copy: 'Mask every occurrence of the selected word or phrase in the document.' },
-    { target: '#unmask-all', title: 'Unmask all', copy: 'Restore every occurrence of the selected word or phrase.' },
+    { target: '.toolbar-search', title: 'Search the document', copy: 'Search for a word or phrase, then use Mask word or Unmask word to change every matching appearance.' },
+    { target: '#mask-all', title: 'Mask word', copy: 'Mask every occurrence of the selected word or phrase in the document.' },
+    { target: '#unmask-all', title: 'Unmask word', copy: 'Restore every occurrence of the selected word or phrase.' },
     { target: '#selection-mode', title: 'Word selection', copy: 'Drag a rectangle over the document to select every whole word it touches.' },
     { target: '#free-selection', title: 'Free selection', copy: 'Drag a rectangle over the document to define the area that will be masked.' },
     { target: '#filter-toggle', title: 'Filter', copy: 'Choose which types of information the AI looks for in the document.' },
-    { target: '#final-redact', title: 'Redact', copy: 'Apply the selected redactions after you have reviewed them.' }
+    { target: '#final-redact', title: 'Apply Redactions', copy: 'Apply the selected redactions after you have reviewed them.' }
   ];
 
   const categoryLabels = {
@@ -75,6 +75,8 @@ This fictional document is provided for demonstration only. All names, contact d
     guideIndex: -1,
     guideDismissed: false,
     guideHoverOnly: false,
+    clarificationTimer: 0,
+    clarificationTarget: null,
     tutorialPage: 1,
     zoom: 1,
     freeSelectionMode: false,
@@ -218,6 +220,45 @@ This fictional document is provided for demonstration only. All names, contact d
     $$('.guided-highlight').forEach(function (element) { element.classList.remove('guided-highlight'); });
   }
 
+  function hideToolClarification() {
+    window.clearTimeout(state.clarificationTimer);
+    state.clarificationTimer = 0;
+    state.clarificationTarget = null;
+    const clarification = $('#tool-clarification');
+    if (clarification) clarification.hidden = true;
+  }
+
+  function showToolClarification(target, step) {
+    const clarification = $('#tool-clarification');
+    if (!clarification) return;
+    const title = $('.tool-clarification-title', clarification);
+    const copy = $('.tool-clarification-copy', clarification);
+    title.textContent = step.title;
+    copy.textContent = step.copy;
+    clarification.hidden = false;
+    const rect = target.getBoundingClientRect();
+    const bounds = clarification.getBoundingClientRect();
+    const left = Math.max(12, Math.min(rect.left + rect.width / 2 - bounds.width / 2, window.innerWidth - bounds.width - 12));
+    const top = rect.bottom + 9;
+    clarification.style.left = `${left}px`;
+    clarification.style.top = `${top}px`;
+  }
+
+  function scheduleToolClarification(target) {
+    hideToolClarification();
+    const selector = guideSteps.map(function (step) { return step.target; }).join(',');
+    const matchedTarget = target.closest(selector);
+    if (!matchedTarget) return;
+    const index = guideSteps.findIndex(function (step) { return matchedTarget.matches(step.target); });
+    if (index < 0) return;
+    state.clarificationTarget = matchedTarget;
+    state.clarificationTimer = window.setTimeout(function () {
+      if (state.clarificationTarget === matchedTarget && state.realToolActive && state.screen === 'review') {
+        showToolClarification(matchedTarget, guideSteps[index]);
+      }
+    }, 500);
+  }
+
   function positionGuideCallout() {
     if (state.guideIndex < 0) return;
     const step = guideSteps[state.guideIndex];
@@ -268,6 +309,15 @@ This fictional document is provided for demonstration only. All names, contact d
     state.reachedSteps = new Set(['tutorial', 'why']);
     navigate('demo');
     renderUploadScreen();
+  }
+
+  function showAssistantTip() {
+    const dock = $('#assistant-dock');
+    dock.hidden = false;
+    $('#assistant-notification').hidden = false;
+    $('#chat-window').hidden = true;
+    $('#help-button').setAttribute('aria-expanded', 'false');
+    positionAssistantDock();
   }
 
   function startTutorialTransition() {
@@ -395,6 +445,7 @@ This fictional document is provided for demonstration only. All names, contact d
     state.tutorialActive = false;
     navigate('demo');
     renderUploadScreen();
+    showAssistantTip();
   }
 
   function renderUploadScreen() {
@@ -503,6 +554,7 @@ This fictional document is provided for demonstration only. All names, contact d
     const list = $('#entity-list');
     list.innerHTML = '';
     state.entities.forEach(function (entity, index) {
+      if (entity.category === 'search') return;
       const item = document.createElement('button');
       item.type = 'button';
       item.className = 'entity-item';
@@ -536,21 +588,22 @@ This fictional document is provided for demonstration only. All names, contact d
       list.parentElement.append(selectAll);
     }
     selectAll.hidden = state.entities.length === 0;
-    const allSelected = state.entities.length > 0 && state.entities.every(function (entity) { return entity.selected; });
+    const suggestions = state.entities.filter(function (entity) { return entity.category !== 'search'; });
+    const allSelected = suggestions.length > 0 && suggestions.every(function (entity) { return entity.selected; });
     selectAll.textContent = allSelected ? 'Deselect all' : 'Select all';
     selectAll.setAttribute('aria-label', allSelected ? 'Deselect all suggestions' : 'Select all suggestions');
-    selectAll.disabled = state.entities.length === 0;
+    selectAll.disabled = suggestions.length === 0;
 
-    const total = state.entities.length;
-    const selected = state.entities.filter(function (entity) { return entity.selected && state.filters.has(entity.category); }).length;
+    const total = suggestions.length;
+    const selected = suggestions.filter(function (entity) { return entity.selected && state.filters.has(entity.category); }).length;
     $('#suggestion-count').textContent = `${total} ${total === 1 ? 'suggestion' : 'suggestions'}`;
     $('#sidebar-suggestion-count').textContent = String(total);
     $('#selected-count').textContent = `${selected} selected`;
     $('#empty-detections').hidden = total !== 0;
     $('#entity-list').hidden = total === 0;
     $('#final-redact').disabled = false;
-    $('#mask-all').disabled = total === 0;
-    $('#unmask-all').disabled = total === 0 || !state.entities.some(function (entity) { return entity.redacted; });
+    $('#mask-all').disabled = getSearchMatches().length === 0;
+    $('#unmask-all').disabled = !getSearchMatches().some(function (entity) { return entity.redacted; });
   }
 
   function renderReview() {
@@ -596,6 +649,16 @@ This fictional document is provided for demonstration only. All names, contact d
       });
     }
     renderEntities();
+    updateReviewPageControls();
+  }
+
+  function updateReviewPageControls() {
+    const viewer = $('.review-viewer');
+    const currentPage = Number(viewer?.dataset.page || 1);
+    const totalPages = Number(viewer?.dataset.pageTotal || 2);
+    $('#review-page-prev').disabled = currentPage <= 1;
+    $('#review-page-next').disabled = currentPage >= totalPages;
+    $('.page-controls span').textContent = `${currentPage} / ${totalPages}`;
   }
 
   function setDocumentPage(viewer, page) {
@@ -613,7 +676,7 @@ This fictional document is provided for demonstration only. All names, contact d
 
   function buildReviewToolbar() {
     const toolbar = $('.review-toolbar');
-    toolbar.innerHTML = `<div class="toolbar-group zoom-controls"><button class="tool-button" id="zoom-out" type="button" aria-label="Zoom out">−</button><span id="zoom-level">100%</span><button class="tool-button" id="zoom-in" type="button" aria-label="Zoom in">+</button></div><div class="toolbar-group page-controls"><button class="tool-button" id="review-page-prev" type="button" aria-label="Previous page">‹</button><span>1 / 2</span><button class="tool-button" id="review-page-next" type="button" aria-label="Next page">›</button></div><div class="toolbar-search"><input id="document-search" type="search" placeholder="Search document" aria-label="Search document"><button class="tool-button" id="find-selection" type="button">Find</button></div><button class="tool-button" id="mask-all" type="button">Mask all</button><button class="tool-button" id="unmask-all" type="button">Unmask all</button><button class="tool-button mode-button" id="selection-mode" type="button" aria-pressed="false">Word selection</button><button class="tool-button mode-button" id="free-selection" type="button" aria-pressed="false">Free selection</button><div class="filter-wrap"><button class="tool-button" id="filter-toggle" type="button" aria-expanded="false">Filters</button><div class="filter-menu" id="filter-menu" hidden><strong>Show categories</strong><div id="filter-options"></div><button class="filter-reset" id="clear-filters" type="button">Show all</button></div></div><button class="button button-primary toolbar-redact" id="final-redact" type="button">Redact</button>`;
+    toolbar.innerHTML = `<div class="toolbar-group zoom-controls"><button class="tool-button" id="zoom-out" type="button" aria-label="Zoom out">−</button><span id="zoom-level">100%</span><button class="tool-button" id="zoom-in" type="button" aria-label="Zoom in">+</button></div><div class="toolbar-group page-controls"><button class="tool-button" id="review-page-prev" type="button" aria-label="Previous page">‹</button><span>1 / 2</span><button class="tool-button" id="review-page-next" type="button" aria-label="Next page">›</button></div><div class="toolbar-search"><input id="document-search" type="search" placeholder="Find word or phrase in the document" aria-label="Find word or phrase in the document"><button class="tool-button" id="find-selection" type="button">Find</button></div><button class="tool-button" id="mask-all" type="button">Mask word</button><button class="tool-button" id="unmask-all" type="button">Unmask word</button><button class="tool-button mode-button" id="selection-mode" type="button" aria-pressed="false">Word selection</button><button class="tool-button mode-button" id="free-selection" type="button" aria-pressed="false">Free selection</button><div class="filter-wrap"><button class="tool-button" id="filter-toggle" type="button" aria-expanded="false">Filters</button><div class="filter-menu" id="filter-menu" hidden><strong>Show categories</strong><div id="filter-options"></div><button class="filter-reset" id="clear-filters" type="button">Show all</button></div></div><button class="button button-primary toolbar-redact" id="final-redact" type="button">Apply Redactions</button>`;
   }
 
   function updateSearch(value) {
@@ -628,17 +691,18 @@ This fictional document is provided for demonstration only. All names, contact d
           value: state.sourceText.slice(start, start + query.length),
           start,
           end: start + query.length,
-          selected: true,
+          selected: false,
           redacted: false
         });
         start = source.indexOf(query, start + query.length);
       }
       state.entities.sort(function (first, second) { return first.start - second.start; });
     }
-    state.entities.forEach(function (entity) {
-      if (entity.category !== 'search') entity.selected = Boolean(query && entity.value.toLowerCase().includes(query));
-    });
     renderReview();
+  }
+
+  function getSearchMatches() {
+    return state.entities.filter(function (entity) { return entity.category === 'search'; });
   }
 
   function updateDragBox(event) {
@@ -725,7 +789,15 @@ This fictional document is provided for demonstration only. All names, contact d
     state.freeSelectionMode = false;
     state.zoom = 1;
     state.freeSelections = [];
+    state.dragStart = null;
+    state.dragBox = null;
     $('#selection-mode').setAttribute('aria-pressed', 'false');
+    $('#selection-mode').textContent = 'Word selection';
+    $('#free-selection').setAttribute('aria-pressed', 'false');
+    $('#review-paper-scroll').classList.remove('is-selecting', 'is-free-selecting');
+    $('.review-viewer').dataset.page = '1';
+    $('.review-viewer').dataset.pageTotal = '2';
+    $('.page-controls span').textContent = '1 / 2';
     $('#review-live-status').textContent = 'Sample loaded. Review each suggestion before redacting.';
   }
 
@@ -752,7 +824,12 @@ This fictional document is provided for demonstration only. All names, contact d
   }
 
   function redactSelected() {
-    const chosen = state.entities.filter(function (entity) { return entity.selected; });
+    const chosen = state.entities.filter(function (entity) { return entity.category !== 'search' && entity.selected; });
+    if (!chosen.length && !state.freeSelections.length) {
+      $('#review-live-status').textContent = 'Select a suggested detail or draw an area before applying redactions.';
+      showToast('Select a suggested detail or draw an area first.');
+      return;
+    }
     chosen.forEach(function (entity) {
       entity.redacted = true;
       entity.selected = false;
@@ -816,7 +893,7 @@ This fictional document is provided for demonstration only. All names, contact d
     state.filters = new Set(Object.keys(categoryLabels));
     state.selectionMode = false;
     $('#selection-mode').setAttribute('aria-pressed', 'false');
-    $('#final-redact').textContent = 'Redact';
+    $('#final-redact').textContent = 'Apply Redactions';
     delete $('#final-redact').dataset.confirm;
     $('#review-live-status').textContent = state.entities.length
       ? `${state.entities.length} suggestions found. Review them before redacting.`
@@ -865,6 +942,7 @@ This fictional document is provided for demonstration only. All names, contact d
   }
 
   function resetWorkflowState() {
+    hideToolClarification();
     window.clearTimeout(state.transitionTimer);
     if (state.fileUrl) URL.revokeObjectURL(state.fileUrl);
     state.fileUrl = '';
@@ -886,7 +964,7 @@ This fictional document is provided for demonstration only. All names, contact d
     state.tutorialActive = false;
     state.reachedSteps = new Set();
     $('#document-upload').value = '';
-    $('#final-redact').textContent = 'Redact';
+    $('#final-redact').textContent = 'Apply Redactions';
     $('#final-redact').disabled = false;
     delete $('#final-redact').dataset.confirm;
     $('#finish-redaction').hidden = true;
@@ -984,6 +1062,7 @@ This fictional document is provided for demonstration only. All names, contact d
       $('#assistant-notification').hidden = true;
       $('#help-button').setAttribute('aria-expanded', 'false');
       startTutorialTransition();
+      showAssistantTip();
     } else if (target.matches('[data-action="use-tool"]')) {
       startRealTool();
     } else if (target.matches('[data-action="start-demo"]')) {
@@ -1066,32 +1145,34 @@ This fictional document is provided for demonstration only. All names, contact d
       $('#assistant-notification').hidden = true;
       if ($('#chat-window').hidden) $('#assistant-dock').hidden = true;
     } else if (target.id === 'mask-all') {
-      const selected = state.entities.filter(function (entity) { return entity.selected; });
-      if (!selected.length) {
-        showToast('Search for and select a word or phrase first.');
+      const matches = getSearchMatches();
+      if (!matches.length) {
+        showToast('Search for a word or phrase first.');
         return;
       }
-      updateEntities(function (entity) {
-        if (entity.selected) entity.redacted = true;
+      matches.forEach(function (entity) {
+        entity.redacted = true;
       });
-      $('#review-live-status').textContent = 'Every selected occurrence is masked in the preview.';
-      showToast(`${selected.length} matching occurrence${selected.length === 1 ? '' : 's'} masked.`);
+      renderReview();
+      $('#review-live-status').textContent = 'Every occurrence matching your search is masked in the preview.';
+      showToast(`${matches.length} matching occurrence${matches.length === 1 ? '' : 's'} masked.`);
     } else if (target.id === 'unmask-all') {
-      const selected = state.entities.filter(function (entity) { return entity.selected; });
-      if (!selected.length) {
-        showToast('Search for and select a word or phrase first.');
+      const matches = getSearchMatches();
+      if (!matches.length) {
+        showToast('Search for a word or phrase first.');
         return;
       }
-      updateEntities(function (entity) {
-        if (entity.selected) entity.redacted = false;
+      matches.forEach(function (entity) {
+        entity.redacted = false;
       });
-      $('#review-live-status').textContent = 'Every selected occurrence is visible again.';
-      $('#final-redact').textContent = 'Redact';
-      delete $('#final-redact').dataset.confirm;
-      showToast(`${selected.length} matching occurrence${selected.length === 1 ? '' : 's'} unmasked.`);
+      renderReview();
+      $('#review-live-status').textContent = 'Every occurrence matching your search is visible again.';
+      showToast(`${matches.length} matching occurrence${matches.length === 1 ? '' : 's'} unmasked.`);
     } else if (target.id === 'selection-mode') {
       state.selectionMode = !state.selectionMode;
       state.freeSelectionMode = false;
+      state.dragStart = null;
+      state.dragBox = null;
       target.setAttribute('aria-pressed', String(state.selectionMode));
       target.textContent = state.selectionMode ? 'Word selection on' : 'Word selection';
       $('#free-selection').setAttribute('aria-pressed', 'false');
@@ -1103,6 +1184,8 @@ This fictional document is provided for demonstration only. All names, contact d
     } else if (target.id === 'free-selection') {
       state.freeSelectionMode = !state.freeSelectionMode;
       state.selectionMode = false;
+      state.dragStart = null;
+      state.dragBox = null;
       target.setAttribute('aria-pressed', String(state.freeSelectionMode));
       $('#selection-mode').setAttribute('aria-pressed', 'false');
       $('#review-paper-scroll').classList.toggle('is-free-selecting', state.freeSelectionMode);
@@ -1119,19 +1202,25 @@ This fictional document is provided for demonstration only. All names, contact d
       const viewer = $('.review-viewer');
       const currentPage = Number(viewer.dataset.page || 1);
       setDocumentPage(viewer, currentPage + (target.id === 'review-page-next' ? 1 : -1));
-      $('.page-controls span').textContent = `${viewer.dataset.page || 1} / ${viewer.dataset.pageTotal || 2}`;
+      updateReviewPageControls();
     } else if (target.id === 'document-search') {
       updateSearch(target.value);
     } else if (target.id === 'find-selection') {
-      const firstSelected = state.entities.find(function (entity) { return entity.selected; });
-      if (!firstSelected) {
-        showToast('Select a suggested detail first.');
+      const searchMatch = getSearchMatches()[0];
+      const firstSelected = state.entities.find(function (entity) {
+        return entity.category !== 'search' && entity.selected;
+      });
+      const targetEntity = searchMatch || firstSelected;
+      if (!targetEntity) {
+        showToast('Search for a word or select a suggested detail first.');
       } else {
-        const index = state.entities.indexOf(firstSelected);
+        const index = state.entities.indexOf(targetEntity);
         const element = $(`[data-entity-index="${index}"]`, $('#review-paper'));
         element?.scrollIntoView({ behavior: 'smooth', block: 'center' });
         element?.focus({ preventScroll: true });
-        showToast(`Showing ${categoryLabels[firstSelected.category].toLowerCase()} in the document.`);
+        showToast(searchMatch
+          ? `Showing ${searchMatch.value} in the document.`
+          : `Showing ${categoryLabels[targetEntity.category].toLowerCase()} in the document.`);
       }
     } else if (target.id === 'filter-toggle') {
       togglePopover(target, $('#filter-menu'));
@@ -1141,11 +1230,12 @@ This fictional document is provided for demonstration only. All names, contact d
       updateFilterMenu();
       renderReview();
     } else if (target.id === 'select-all-suggestions') {
-      const allSelected = state.entities.length > 0 && state.entities.every(function (entity) { return entity.selected; });
-      state.entities.forEach(function (entity) { entity.selected = !allSelected; });
+      const suggestions = state.entities.filter(function (entity) { return entity.category !== 'search'; });
+      const allSelected = suggestions.length > 0 && suggestions.every(function (entity) { return entity.selected; });
+      suggestions.forEach(function (entity) { entity.selected = !allSelected; });
       $('#review-live-status').textContent = allSelected
         ? 'Suggestions deselected from review.'
-        : `${state.entities.length} suggestions selected for review.`;
+        : `${suggestions.length} suggestions selected for review.`;
       renderReview();
     } else if (target.id === 'final-redact') {
       if (state.tutorialActive && state.guideIndex === guideSteps.length - 1) closeGuide();
@@ -1277,7 +1367,7 @@ This fictional document is provided for demonstration only. All names, contact d
         section.querySelector('.ai-type-descriptive')?.classList.add('ai-type-elinar');
       }
     });
-    $('#why-title').textContent = 'Why Choose Elinar?';
+    $('#why-title').textContent = 'About Elinar';
     $$('.benefit-list li').forEach(function (item, index) {
       const copy = item.querySelector('span:nth-child(2)');
       if (!copy) return;
@@ -1325,6 +1415,10 @@ This fictional document is provided for demonstration only. All names, contact d
     playHomeIntro();
     document.addEventListener('click', handleClick);
     document.addEventListener('mouseover', function (event) {
+      if (state.realToolActive && state.screen === 'review') {
+        scheduleToolClarification(event.target);
+        return;
+      }
       if (!state.guideDismissed || !state.tutorialActive || state.screen !== 'review') return;
       if (event.relatedTarget?.closest && event.relatedTarget.closest('#guide-callout')) return;
       const target = event.target.closest(guideSteps.map(function (step) { return step.target; }).join(','));
@@ -1333,6 +1427,12 @@ This fictional document is provided for demonstration only. All names, contact d
       if (index >= 0) showGuideStep(index, true);
     });
     document.addEventListener('mouseout', function (event) {
+      if (state.realToolActive && state.screen === 'review') {
+        const target = event.target.closest(guideSteps.map(function (step) { return step.target; }).join(','));
+        const related = event.relatedTarget;
+        if (target && (!related || !target.contains(related))) hideToolClarification();
+        return;
+      }
       if (!state.guideHoverOnly || event.relatedTarget?.closest?.('#guide-callout')) return;
       const target = event.target.closest(guideSteps.map(function (step) { return step.target; }).join(','));
       if (target) closeGuide();
@@ -1345,6 +1445,13 @@ This fictional document is provided for demonstration only. All names, contact d
     window.addEventListener('scroll', positionGuideCallout, true);
     window.addEventListener('scroll', positionAssistantDock, true);
     window.addEventListener('resize', positionGuideCallout);
+    window.addEventListener('resize', function () {
+      if (state.clarificationTarget && !$('#tool-clarification').hidden) {
+        const target = state.clarificationTarget;
+        const step = guideSteps.find(function (item) { return target.matches(item.target); });
+        if (step) showToolClarification(target, step);
+      }
+    });
     window.addEventListener('resize', positionAssistantDock);
     $('#chat-form').addEventListener('submit', handleChatSubmit);
     document.addEventListener('click', function (event) {
